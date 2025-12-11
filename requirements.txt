@@ -1,0 +1,20 @@
+# Browser Agent Dependencies
+# Требования для AI Browser Agent
+
+# Playwright - браузерная автоматизация
+playwright>=1.40.0
+
+# Anthropic Claude API - AI движок для принятия решений
+anthropic>=0.18.0
+
+# OpenAI API (для OpenRouter поддержки)
+openai>=1.0.0
+
+# Загрузка переменных окружения из .env файла
+python-dotenv>=1.0.0
+
+# Rich - красивый вывод в консоли (цвета, таблицы, прогресс)
+rich>=13.0.0
+
+# Опционально: для более удобной работы с async
+# asyncio уже включён в стандартную библиотеку Python 3.7+

@@ -83,8 +83,8 @@ class Config:
     # Уровень логирования
     log_level: str = "INFO"
     
-    # Максимальный размер упрощённого DOM (символов)
-    max_dom_size: int = 10000
+    # Максимальный размер упрощённого DOM (символов) - увеличено для сложных страниц
+    max_dom_size: int = 15000
     
     # Security Layer настройки
     security_enabled: bool = True
@@ -106,13 +106,9 @@ class Config:
     custom_api_key: Optional[str] = None
     llm_model: str = "claude-sonnet-4-latest"
     
-    # Настройки агента
-    max_iterations: int = 30  # Уменьшено с 50 для контроля стоимости
-    task_timeout: int = 300  # Уменьшено с 600 (5 минут)
-    
-    # Cost control - NEW
-    max_cost_per_task: float = 0.50  # Максимальная стоимость одной задачи в USD
-    warn_cost_threshold: float = 0.20  # Порог предупреждения в USD
+    # Настройки агента - увеличено для сложных задач
+    max_iterations: int = 40  # Увеличено для сложных задач
+    task_timeout: int = 600  # 10 минут для сложных задач
     
     # Show LLM thinking/reasoning in console
     show_thinking: bool = True
@@ -171,12 +167,10 @@ class Config:
             custom_api_base_url=os.getenv("CUSTOM_API_BASE_URL", ""),
             custom_api_key=os.getenv("CUSTOM_API_KEY"),
             llm_model=os.getenv("LLM_MODEL", "claude-sonnet-4-latest"),
-            max_iterations=int(os.getenv("MAX_ITERATIONS", "30")),
-            task_timeout=int(os.getenv("TASK_TIMEOUT", "300")),
+            max_iterations=int(os.getenv("MAX_ITERATIONS", "40")),
+            task_timeout=int(os.getenv("TASK_TIMEOUT", "600")),
             show_thinking=os.getenv("SHOW_THINKING", "true").lower() == "true",
             log_mode=os.getenv("LOG_MODE", "compact"),
-            max_cost_per_task=float(os.getenv("MAX_COST_PER_TASK", "0.50")),
-            warn_cost_threshold=float(os.getenv("WARN_COST_THRESHOLD", "0.20")),
         )
 
 

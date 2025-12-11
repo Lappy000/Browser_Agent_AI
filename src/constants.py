@@ -44,20 +44,20 @@ class Retries:
 class Limits:
     """Лимиты для предотвращения переполнения."""
     
-    # DOM и элементы - ОПТИМИЗИРОВАНО для экономии токенов
-    MAX_DOM_SIZE = 4000  # Уменьшено с 6000 - экономия ~30% токенов
-    MAX_ELEMENTS = 30  # Уменьшено с 40 - экономия ~25% токенов
-    MAX_TEXT_LENGTH = 100  # Уменьшено с 200 - экономия ~50% на текстах
-    MAX_SELECTOR_LENGTH = 60  # Уменьшено с 80
-    MAX_CLASS_LENGTH = 40  # Уменьшено с 60
+    # DOM и элементы - УВЕЛИЧЕНО для лучшего анализа страниц
+    MAX_DOM_SIZE = 8000  # Увеличено для Gmail/сложных страниц
+    MAX_ELEMENTS = 50  # Увеличено для лучшего охвата
+    MAX_TEXT_LENGTH = 200  # Увеличено для полных заголовков
+    MAX_SELECTOR_LENGTH = 80  # Увеличено
+    MAX_CLASS_LENGTH = 60  # Увеличено
     
-    # История и сообщения - КРИТИЧЕСКАЯ оптимизация
-    MAX_MESSAGE_HISTORY = 4  # Уменьшено с 6 - экономия ~33% на истории
-    MAX_HISTORY = 15  # Уменьшено с 20
+    # История и сообщения
+    MAX_MESSAGE_HISTORY = 6  # Увеличено для лучшего контекста
+    MAX_HISTORY = 20  # Увеличено
     
     # Итерации и время
-    MAX_ITERATIONS = 30  # Уменьшено с 50 - предотвращает runaway costs
-    TASK_TIMEOUT_SECONDS = 300  # Уменьшено с 600 (5 минут вместо 10)
+    MAX_ITERATIONS = 40  # Увеличено для сложных задач
+    TASK_TIMEOUT_SECONDS = 600  # 10 минут для сложных задач
 
 
 class LoopDetection:
@@ -91,11 +91,11 @@ class PageAnalysis:
     """Настройки анализа страниц."""
     
     # Глубина DOM
-    MAX_DEPTH = 6
-    MAX_CHILDREN = 20
+    MAX_DEPTH = 8
+    MAX_CHILDREN = 30
     
     # Текстовый контент
-    MAX_TEXT_CONTENT_LENGTH = 2000
+    MAX_TEXT_CONTENT_LENGTH = 5000
     
     # Viewport fallback
     DEFAULT_VIEWPORT_WIDTH = 1280
@@ -108,14 +108,14 @@ class TokenOptimization:
     # Compact prompts
     USE_COMPACT_PROMPTS = True
     
-    # Размеры контента - ОПТИМИЗИРОВАНО
-    DOM_SIZE_COMPACT = 3000  # Уменьшено с 6000 - экономия 50%
-    ELEMENTS_COUNT_COMPACT = 25  # Уменьшено с 40 - экономия ~40%
-    TEXT_CONTENT_COMPACT = 1500  # Уменьшено с 2500 - экономия 40%
+    # Размеры контента - УВЕЛИЧЕНО для лучшего анализа
+    DOM_SIZE_COMPACT = 6000  # Увеличено для Gmail/сложных страниц
+    ELEMENTS_COUNT_COMPACT = 40  # Увеличено для лучшего охвата
+    TEXT_CONTENT_COMPACT = 3000  # Увеличено для извлечения данных
     
-    # Cost control - NEW
-    MAX_COST_PER_TASK_USD = 0.50  # Максимальная стоимость одной задачи
-    WARN_COST_THRESHOLD_USD = 0.25  # Порог предупреждения о стоимости
+    # Cost control
+    MAX_COST_PER_TASK_USD = 1.00  # Увеличено для сложных задач
+    WARN_COST_THRESHOLD_USD = 0.50  # Порог предупреждения о стоимости
 
 
 class HumanLikeDelays:

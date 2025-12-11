@@ -171,6 +171,7 @@ class BrowserAgent:
         self._original_task: str = ""           # Store original task for reflection
         self._action_count: int = 0             # Count actions taken
         self._actions_taken: List[str] = []     # List of actions for reflection
+        self._last_clicked_text: str = ""       # Store text of last clicked element for reflection
         
         self._is_started = False
         
@@ -276,6 +277,7 @@ class BrowserAgent:
         self._original_task = task
         self._action_count = 0
         self._actions_taken = []
+        self._last_clicked_text = ""
         
         await self._notify_status(f"Начало задачи: {task[:50]}...")
         
@@ -404,28 +406,6 @@ class BrowserAgent:
                             f"cost=${iteration_cost:.4f}, total=${self._total_cost:.4f}"
                         )
                         
-                        # COST CONTROL: Проверяем лимиты стоимости
-                        if self._total_cost >= config.max_cost_per_task:
-                            logger.warning(
-                                f"💰 COST LIMIT REACHED: ${self._total_cost:.4f} >= "
-                                f"${config.max_cost_per_task:.2f}"
-                            )
-                            print(f"\n⚠️ ЛИМИТ СТОИМОСТИ ДОСТИГНУТ: ${self._total_cost:.4f}")
-                            return self.task_manager.complete(
-                                f"Задача прервана: достигнут лимит стоимости "
-                                f"(${self._total_cost:.4f} >= ${config.max_cost_per_task:.2f})"
-                            )
-                        
-                        # Предупреждение о приближении к лимиту
-                        if (self._total_cost >= config.warn_cost_threshold and
-                            not getattr(self, '_cost_warning_shown', False)):
-                            self._cost_warning_shown = True
-                            logger.warning(
-                                f"💰 Cost warning: ${self._total_cost:.4f} >= "
-                                f"${config.warn_cost_threshold:.2f} threshold"
-                            )
-                            print(f"\n⚠️ ВНИМАНИЕ: Стоимость задачи ${self._total_cost:.4f} "
-                                  f"(порог ${config.warn_cost_threshold:.2f})")
                 
                 except LLMClientError as e:
                     logger.error(f"Ошибка LLM: {e}")
@@ -883,17 +863,81 @@ class BrowserAgent:
                 }
             
             case "click":
-                selector = await self._get_selector(tool_input)
-                if not selector:
+                selector, position = await self._get_selector_with_position(tool_input)
+                if not selector and not position:
                     return {
                         "success": False,
                         "message": "Не указан селектор или индекс элемента"
                     }
-                await controller.click(selector)
-                return {
-                    "success": True,
-                    "message": f"Клик выполнен: {selector}"
-                }
+                
+                # COORDINATES FIRST: More reliable for dynamic web apps like Gmail
+                # Selectors often fail on complex DOMs, coordinates are stable
+                click_success = False
+                used_coordinates = False
+                
+                # Get viewport dimensions for validation
+                viewport = {"width": 1280, "height": 720}  # Default
+                try:
+                    if controller.page:
+                        viewport = await controller.page.evaluate("""
+                            () => ({ width: window.innerWidth, height: window.innerHeight })
+                        """)
+                except Exception:
+                    pass
+                
+                # Try coordinates FIRST if available (faster and more reliable)
+                if position:
+                    x, y = position.get("x"), position.get("y")
+                    if x is not None and y is not None:
+                        # VALIDATION: Check if coordinates are within viewport
+                        # Off-screen elements (e.g., in hidden horizontal scrolls) have negative or too large coords
+                        if y < 0 or y > viewport["height"] or x < 0 or x > viewport["width"]:
+                            logger.warning(f"Element at ({x}, {y}) is OFF-SCREEN (viewport: {viewport['width']}x{viewport['height']})")
+                            return {
+                                "success": False,
+                                "message": f"⚠️ Элемент СКРЫТ за пределами экрана (координаты: x={x}, y={y}). "
+                                          f"Viewport: {viewport['width']}x{viewport['height']}.\n"
+                                          f"💡 РЕШЕНИЕ: Этот элемент находится в горизонтальном меню. "
+                                          f"Нажми СТРЕЛКУ навигации (◀ или ▶) несколько раз, чтобы прокрутить меню "
+                                          f"и сделать элемент видимым, затем попробуй снова."
+                            }
+                        
+                        try:
+                            await controller.click_at_position(int(x), int(y))
+                            click_success = True
+                            used_coordinates = True
+                            logger.debug(f"Coordinate click at ({x}, {y})")
+                        except Exception as e:
+                            logger.warning(f"Coordinate click failed: {e}, trying selector fallback")
+                
+                # Fallback to selector if coordinates failed
+                if not click_success and selector:
+                    try:
+                        await controller.click(selector)
+                        click_success = True
+                    except Exception as e:
+                        logger.error(f"Selector click also failed: {e}")
+                        return {
+                            "success": False,
+                            "message": f"Клик не удался ни по координатам, ни по селектору: {e}"
+                        }
+                
+                if click_success:
+                    if used_coordinates:
+                        return {
+                            "success": True,
+                            "message": f"Клик выполнен: ({position.get('x')}, {position.get('y')})"
+                        }
+                    else:
+                        return {
+                            "success": True,
+                            "message": f"Клик выполнен: {selector}"
+                        }
+                else:
+                    return {
+                        "success": False,
+                        "message": f"Клик не удался: нет координат и селектора"
+                    }
             
             case "click_at_coordinates":
                 # Получаем координаты напрямую или из элемента
@@ -1085,6 +1129,69 @@ class BrowserAgent:
                     "message": f"Неизвестный инструмент: {tool_name}"
                 }
     
+    async def _get_selector_with_position(self, tool_input: Dict[str, Any]) -> tuple[Optional[str], Optional[Dict[str, int]]]:
+        """
+        Получает селектор И позицию элемента для fallback к координатам.
+        Also stores element text for better action reflection.
+        
+        Args:
+            tool_input: Параметры инструмента
+            
+        Returns:
+            tuple[str | None, Dict | None]: (selector, position) - position содержит x, y центра элемента
+        """
+        element_index = tool_input.get("element_index")
+        if element_index is not None:
+            page = self.browser_controller.page
+            if page:
+                try:
+                    fresh_elements = await self.page_analyzer.get_interactive_elements(page)
+                    if 0 <= element_index < len(fresh_elements):
+                        element = fresh_elements[element_index]
+                        selector = element.selector
+                        position = element.position  # Contains x, y of element center
+                        # MEMORY FIX: Store element text for better action reflection
+                        self._last_clicked_text = element.text[:40] if element.text else ""
+                        logger.debug(f"Fresh element[{element_index}] selector: {selector}, position: {position}, text: {self._last_clicked_text}")
+                        return selector, position
+                    else:
+                        logger.warning(f"Invalid element_index: {element_index}, max={len(fresh_elements)-1}")
+                except Exception as e:
+                    logger.warning(f"Failed to get fresh elements: {e}, falling back to cached state")
+            
+            # Fallback to cached state
+            page_state = self.context_manager.get_last_page_state()
+            if page_state:
+                elements = page_state.get("interactive_elements", [])
+                if 0 <= element_index < len(elements):
+                    el = elements[element_index]
+                    # MEMORY FIX: Store element text from cached state
+                    self._last_clicked_text = el.get("text", "")[:40]
+                    return el.get("selector"), el.get("position")
+            
+            logger.warning(f"Invalid element_index: {element_index}")
+            return None, None
+        
+        # Direct selector (no position available)
+        selector = tool_input.get("selector")
+        if selector:
+            self._last_clicked_text = ""  # No text for direct selectors
+            page = self.browser_controller.page
+            if page:
+                try:
+                    locator = page.locator(selector)
+                    count = await locator.count()
+                    if count == 0:
+                        logger.warning(f"AI provided selector not found on page: {selector}")
+                        return None, None
+                    return selector, None
+                except Exception as e:
+                    logger.warning(f"Invalid selector syntax: {selector} - {e}")
+                    return None, None
+            return selector, None
+        
+        return None, None
+    
     async def _get_selector(self, tool_input: Dict[str, Any]) -> Optional[str]:
         """
         Получает селектор из параметров инструмента.
@@ -1096,80 +1203,63 @@ class BrowserAgent:
         ВАЖНО: element_index предпочтительнее, т.к. использует реальные элементы со страницы.
         AI-provided selector валидируется на существование перед использованием.
         
+        CRITICAL FIX: Re-analyze page FRESH before each click to avoid stale element indices.
+        The old approach used cached page_state which becomes stale after scrolling.
+        
         Args:
             tool_input: Параметры инструмента
             
         Returns:
             str | None: Селектор или None
         """
-        # Приоритет 1: индекс элемента (ссылается на реальные элементы страницы)
-        element_index = tool_input.get("element_index")
-        if element_index is not None:
-            # Получаем элемент из последнего состояния страницы
-            page_state = self.context_manager.get_last_page_state()
-            if page_state:
-                elements = page_state.get("interactive_elements", [])
-                if 0 <= element_index < len(elements):
-                    return elements[element_index].get("selector")
-            # element_index указан, но невалиден - возвращаем None
-            logger.warning(f"Invalid element_index: {element_index}")
-            return None
-        
-        # Приоритет 2: прямой селектор (только если element_index NOT provided)
-        selector = tool_input.get("selector")
-        if selector:
-            # Валидируем что селектор существует на странице
-            page = self.browser_controller.page
-            if page:
-                try:
-                    element = await page.query_selector(selector)
-                    if element is None:
-                        logger.warning(f"AI provided selector not found on page: {selector}")
-                        return None
-                    return selector
-                except Exception as e:
-                    logger.warning(f"Invalid selector syntax: {selector} - {e}")
-                    return None
-            else:
-                # Нет страницы - возвращаем селектор как есть (будет ошибка при клике)
-                return selector
-        
-        return None
+        selector, _ = await self._get_selector_with_position(tool_input)
+        return selector
     
     def _format_action_for_reflection(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
         """
         Форматирует действие для списка рефлексии.
+        
+        IMPROVED: Now includes actual element text (e.g., "Ozon", "Anthropic")
+        instead of just indices, helping the AI remember what was clicked.
         
         Args:
             tool_name: Имя инструмента
             tool_input: Параметры
             
         Returns:
-            str: Человекочитаемое описание действия
+            str: Человекочитаемое описание действия с контекстом
         """
         match tool_name:
             case "navigate":
                 url = tool_input.get("url", "")[:50]
                 return f"navigate → {url}"
             case "click":
-                selector = tool_input.get("selector", "")[:30]
                 element_idx = tool_input.get("element_index", "")
-                target = selector or f"element[{element_idx}]"
-                return f"click → {target}"
+                # MEMORY FIX: Include element text for better context
+                if self._last_clicked_text:
+                    # Show what was actually clicked (e.g., "Ozon", "Anthropic")
+                    text_preview = self._last_clicked_text[:25]
+                    return f"click[{element_idx}] → \"{text_preview}\""
+                else:
+                    selector = tool_input.get("selector", "")[:30]
+                    target = selector or f"element[{element_idx}]"
+                    return f"click → {target}"
             case "click_at_coordinates":
                 x = tool_input.get("x", 0)
                 y = tool_input.get("y", 0)
-                return f"click_at_coordinates({x}, {y})"
+                return f"click({x},{y})"
             case "type_text":
                 text = tool_input.get("text", "")[:20]
-                return f"type_text → \"{text}...\""
+                return f"type → \"{text}\""
             case "scroll":
                 direction = tool_input.get("direction", "down")
-                return f"scroll → {direction}"
+                return f"scroll {direction}"
             case "extract_data":
-                return "extract_data"
+                return "extract_data ✓"
             case "complete_task":
                 return "complete_task"
+            case "go_back":
+                return "← back"
             case _:
                 return tool_name
     
@@ -1214,6 +1304,13 @@ class BrowserAgent:
         """
         Проверяет на зацикливание (повторение одного действия).
         
+        IMPROVED: Does NOT block valid navigation patterns like:
+        - click back -> click email -> click back -> click email (reading multiple emails)
+        
+        Only triggers for:
+        1. Same exact action repeated N times in a row
+        2. A-B-A-B-A-B pattern (6+ alternations, NOT 4) without navigation
+        
         Args:
             recent_actions: Список последних действий
             max_repeated: Максимум повторений
@@ -1231,11 +1328,34 @@ class BrowserAgent:
         if len(set(last_n)) == 1:
             return True, f"Действие '{last_n[0]}' повторено {max_repeated} раз подряд"
         
-        # Проверяем паттерн A-B-A-B (чередование двух действий)
-        if len(recent_actions) >= 4:
-            last_4 = recent_actions[-4:]
-            if last_4[0] == last_4[2] and last_4[1] == last_4[3] and last_4[0] != last_4[1]:
-                return True, f"Чередование действий: {last_4[0]} ↔ {last_4[1]}"
+        # IMPROVED: Проверяем паттерн A-B-A-B-A-B (6 чередований, НЕ 4!)
+        # 4 чередования - это нормально для чтения нескольких писем/элементов
+        # 6+ чередований - вероятно застряли
+        if len(recent_actions) >= 6:
+            last_6 = recent_actions[-6:]
+            # Check A-B-A-B-A-B pattern
+            if (last_6[0] == last_6[2] == last_6[4] and
+                last_6[1] == last_6[3] == last_6[5] and
+                last_6[0] != last_6[1]):
+                
+                # EXCEPTION: Don't block if one action is navigation-like (back button, scroll)
+                # This is valid behavior for reading multiple items
+                navigation_patterns = ["go_back", "scroll", "click:idx:"]
+                
+                # If alternating between "back" (#21 typically) and clicking items - valid navigation
+                # Check if the pattern looks like: back -> item -> back -> item
+                action_a = last_6[0]
+                action_b = last_6[1]
+                
+                # Heuristic: if both are clicks on DIFFERENT indices, it's not a loop
+                # (e.g., click:idx:21 and click:idx:39 are different elements)
+                if action_a.startswith("click:idx:") and action_b.startswith("click:idx:"):
+                    # Both are clicks - this might be valid navigation (back button + content)
+                    # Only block if they're the EXACT same indices 8+ times
+                    if len(recent_actions) < 8:
+                        return False, ""
+                
+                return True, f"Чередование действий (6x): {action_a} ↔ {action_b}"
         
         return False, ""
     

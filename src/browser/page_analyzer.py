@@ -320,8 +320,19 @@ class PageAnalyzer:
                 function isStableId(id) {
                     if (!id) return false;
                     // Динамические ID обычно содержат :, ;, ^ или выглядят как случайные строки
-                    const dynamicPatterns = /[:;^]|^[a-z0-9]{1,3}$|^[0-9]+$/;
-                    return !dynamicPatterns.test(id);
+                    // Gmail uses IDs like ":ms", ":n0", ":2v" which are NOT stable
+                    // Also reject very short IDs and numeric-only IDs
+                    const dynamicPatterns = /[:;^]|^[a-z0-9]{1,3}$|^[0-9]+$|^:[a-z0-9]+$/i;
+                    if (dynamicPatterns.test(id)) return false;
+                    
+                    // Additional checks for common dynamic patterns
+                    // IDs that are just random characters (no semantic meaning)
+                    if (id.length < 4 && /^[a-z0-9]+$/i.test(id)) return false;
+                    
+                    // IDs with hashes or React-style patterns
+                    if (id.includes('__') || id.match(/[a-z]+-[a-f0-9]{4,}/i)) return false;
+                    
+                    return true;
                 }
                 
                 // Функция для генерации уникального селектора
@@ -413,22 +424,53 @@ class PageAnalyzer:
                     }
                     
                     // Приоритет 7: ТОЛЬКО стабильный ID (если выглядит стабильным)
-                    if (element.id && isStableId(element.id)) {
+                    // IMPORTANT: Skip IDs with : (Gmail dynamic IDs like ":ms", ":n0")
+                    if (element.id && isStableId(element.id) && !element.id.includes(':')) {
                         const byId = document.querySelectorAll('#' + CSS.escape(element.id));
                         if (byId.length === 1) {
                             return '#' + CSS.escape(element.id);
                         }
                     }
                     
-                    // Приоритет 6: nth-child путь от ближайшего элемента с ID
-                    function getPathFromParentWithId(el) {
+                    // Приоритет 8: nth-child путь от ближайшего СТАБИЛЬНОГО ancestor
+                    // IMPORTANT: Do NOT use dynamic IDs (containing :) as anchors
+                    function getPathFromStableAncestor(el) {
                         const path = [];
                         let current = el;
+                        const maxDepth = 10; // Prevent infinite loops
+                        let depth = 0;
                         
-                        while (current && current !== document.body) {
-                            if (current.id) {
+                        while (current && current !== document.body && depth < maxDepth) {
+                            depth++;
+                            
+                            // Check for STABLE ID only (skip dynamic Gmail IDs like :ms)
+                            if (current.id && isStableId(current.id) && !current.id.includes(':')) {
                                 path.unshift('#' + CSS.escape(current.id));
                                 return path.join(' > ');
+                            }
+                            
+                            // Check for stable data-* attributes as anchors
+                            const stableAttrs = ['data-testid', 'data-qa', 'data-cy', 'data-test'];
+                            let foundStableAttr = false;
+                            for (const attr of stableAttrs) {
+                                const value = current.getAttribute(attr);
+                                if (value) {
+                                    path.unshift(`[${attr}="${CSS.escape(value)}"]`);
+                                    foundStableAttr = true;
+                                    return path.join(' > ');
+                                }
+                            }
+                            
+                            // Check for unique aria-label on container
+                            const ariaLabel = current.getAttribute('aria-label');
+                            if (ariaLabel && ariaLabel.length > 3 && ariaLabel.length < 60) {
+                                const selector = `[aria-label="${CSS.escape(ariaLabel)}"]`;
+                                try {
+                                    if (document.querySelectorAll(selector).length === 1) {
+                                        path.unshift(selector);
+                                        return path.join(' > ');
+                                    }
+                                } catch(e) {}
                             }
                             
                             const parent = current.parentElement;
@@ -441,12 +483,12 @@ class PageAnalyzer:
                             current = parent;
                         }
                         
-                        // Если нет ID, возвращаем путь от body
+                        // Если нет стабильного anchor, возвращаем путь от body
                         path.unshift('body');
                         return path.join(' > ');
                     }
                     
-                    return getPathFromParentWithId(element);
+                    return getPathFromStableAncestor(element);
                 }
                 
                 // Проверка видимости
@@ -587,11 +629,13 @@ class PageAnalyzer:
         """
         Извлекает основной текстовый контент страницы.
         
-        Фокусируется на:
-        - Заголовках (h1-h6)
-        - Параграфах (p)
-        - Списках (li)
-        - Статьях (article)
+        Расширенное извлечение для:
+        - Заголовков (h1-h6)
+        - Параграфов (p)
+        - Списков (li)
+        - Статей (article)
+        - Табличных данных (tr, td)
+        - Строк списков (div/span с текстом) - для Gmail и других webapps
         
         Args:
             page: Страница Playwright
@@ -608,7 +652,7 @@ class PageAnalyzer:
                     return '[Document body not available]';
                 }
                 
-                const MAX_LENGTH = 2000;  // Уменьшено с 5000 - экономия 60% токенов
+                const MAX_LENGTH = 5000;  // Увеличено для лучшего извлечения
                 const textParts = [];
                 
                 // Ищем основной контент
@@ -627,8 +671,8 @@ class PageAnalyzer:
                 const paragraphs = mainContent.querySelectorAll('p');
                 paragraphs.forEach(p => {
                     const text = p.textContent?.trim();
-                    if (text && text.length > 20) {
-                        textParts.push(text);
+                    if (text && text.length > 15) {
+                        textParts.push(text.substring(0, 300));
                     }
                 });
                 
@@ -638,12 +682,52 @@ class PageAnalyzer:
                 listItems.forEach(li => {
                     const text = li.textContent?.trim();
                     if (text && text.length > 10) {
-                        listTexts.push('• ' + text.substring(0, 200));
+                        listTexts.push('• ' + text.substring(0, 250));
                     }
                 });
                 if (listTexts.length > 0) {
-                    textParts.push(listTexts.slice(0, 20).join('\\n'));
+                    textParts.push(listTexts.slice(0, 30).join('\\n'));
                 }
+                
+                // GMAIL/WEBAPP SPECIFIC: Извлекаем строки таблиц и списков писем
+                // Ищем элементы с role="row" или tr (часто используются для email lists)
+                const rows = mainContent.querySelectorAll('[role="row"], tr, [role="listitem"]');
+                const rowTexts = [];
+                rows.forEach((row, idx) => {
+                    if (idx > 30) return; // Лимит на количество строк
+                    const text = row.textContent?.trim();
+                    if (text && text.length > 20 && text.length < 500) {
+                        // Убираем лишние пробелы и переносы
+                        const cleanText = text.replace(/\\s+/g, ' ').substring(0, 300);
+                        rowTexts.push(`[ROW${idx}] ${cleanText}`);
+                    }
+                });
+                if (rowTexts.length > 0) {
+                    textParts.push('\\n--- Email/List Items ---\\n' + rowTexts.join('\\n'));
+                }
+                
+                // Извлекаем табличные данные
+                const tables = mainContent.querySelectorAll('table');
+                tables.forEach((table, tableIdx) => {
+                    if (tableIdx > 2) return; // Лимит на количество таблиц
+                    const tableRows = table.querySelectorAll('tr');
+                    const tableTexts = [];
+                    tableRows.forEach((tr, rowIdx) => {
+                        if (rowIdx > 15) return;
+                        const cells = tr.querySelectorAll('td, th');
+                        const cellTexts = [];
+                        cells.forEach(cell => {
+                            const text = cell.textContent?.trim();
+                            if (text) cellTexts.push(text.substring(0, 100));
+                        });
+                        if (cellTexts.length > 0) {
+                            tableTexts.push(cellTexts.join(' | '));
+                        }
+                    });
+                    if (tableTexts.length > 0) {
+                        textParts.push('\\n--- Table ---\\n' + tableTexts.join('\\n'));
+                    }
+                });
                 
                 let result = textParts.join('\\n\\n');
                 
